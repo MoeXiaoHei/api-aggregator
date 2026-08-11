@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-aggregator
+  namespace: kube-system
+  labels:
+    app: api-aggregator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-aggregator
+  template:
+    metadata:
+      labels:
+        app: api-aggregator
+    spec:
+      serviceAccountName: api-aggregator
+      containers:
+      - name: aggregator
+        image: oicq/api-aggregator:latest
+        args:
+        - --allowed-nodes=node01,node02，node03
+        - --v=4
+        ports:
+        - containerPort: 8443
+          name: https
+        volumeMounts:
+        - name: certs
+          mountPath: /etc/certs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: certs
+        secret:
+          secretName: api-aggregator-tls
