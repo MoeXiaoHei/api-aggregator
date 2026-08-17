@@ -1,377 +1,627 @@
-# API Aggregator
+# Webhook Node Validator
 
-Kubernetes API 聚合层服务，用于限制 Pod 只能调度到白名单节点，并过滤 `kubectl get pods` 返回结果。
+一个 Kubernetes Validating + Mutating Admission Webhook，用于限制 Pod 只能调度到指定的节点，并支持 Kubernetes 调度器智能选择节点。
 
 ## ✨ 功能特性
 
-- ✅ **节点白名单控制**：只允许 Pod 调度到指定的节点
-- ✅ **LIST 请求过滤**：`kubectl get pods` 只返回白名单节点上的 Pod
-- ✅ **创建 Pod 限制**：只能指定白名单节点创建 Pod
-- ✅ **删除 Pod 限制**：只能删除白名单节点上的 Pod
-- ✅ **更新 Pod 限制**：只能更新白名单节点上的 Pod
-- ✅ **Token 认证**：使用 ServiceAccount Token 进行身份验证
-- ✅ **透明代理**：其他请求（如 Service、ConfigMap 等）正常透传
-- ✅ **高可用**：支持多副本部署，自动滚动更新
-- ✅ **健康检查**：支持 liveness 和 readiness 探针
+- ✅ **节点白名单**：只允许 Pod 调度到指定的节点
+- ✅ **智能调度**：不指定节点时，由 Kubernetes 调度器自动选择最优的白名单节点（资源感知、负载均衡）
+- ✅ **自动注入 NodeSelector**：无需手动指定节点，自动注入 `nodeSelector: {node-group: allowed}`
+- ✅ **灵活指定节点**：用户也可显式指定节点，Webhook 校验是否在白名单中
+- ✅ **命名空间级别控制**：通过 `namespaceSelector` 精确控制 Webhook 生效范围
+- ✅ **RBAC 权限控制**：通过 ServiceAccount + RBAC 精细化控制权限
+- ✅ **生产级部署**：支持多副本、滚动更新、健康检查
+- ✅ **彩色输出**：部署和清理脚本带颜色区分，易于阅读
 
 ---
 
-## 📐 架构图
+## 📋 目录结构
+```
+webhook-node-validator/
+├── 1-serviceaccount.yaml # ServiceAccount 定义
+├── 2-rbac.yaml # RBAC 权限定义
+├── 3-webhook-code-configmap.yaml # Webhook Python 代码
+├── 5-webhook-deployment.yaml # Webhook Deployment
+├── 6-webhook-service.yaml # Webhook Service
+├── 7-validating-webhook.yaml # ValidatingWebhookConfiguration
+├── 9-mutating-webhook.yaml # MutatingWebhookConfiguration
+├── deploy.sh # 一键部署脚本（带颜色）
+├── cleanup.sh # 一键清理脚本（带颜色）
+├── generate-certs.sh # 证书生成脚本
+├── Dockerfile # 自定义镜像构建文件
+└── README.md # 本文件
+```
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           你的 Java 代码 / kubectl                          │
-│                     (使用 ServiceAccount Token)                             │
-└─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         API Aggregator (自定义 API Server)                  │
-│                                                                             │
-│  1. 接收请求 → 验证 Token                                                  │
-│  2. 解析请求路径 → /api/v1/namespaces/default/pods                         │
-│  3. 判断操作类型 → LIST / GET / CREATE / DELETE / UPDATE                   │
-│  4. LIST → 从 K8s 获取所有 Pod → 过滤白名单节点 → 返回过滤结果            │
-│  5. CREATE → 检查 nodeName 是否在白名单中 → 通过则创建                    │
-│  6. DELETE → 检查 Pod 是否在白名单节点 → 通过则删除                       │
-│  7. 其他请求 → 透明代理到 Kubernetes API                                  │
-└─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Kubernetes API Server                               │
-│                                                                             │
-│  处理经过 Aggregator 过滤后的请求                                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+
 
 ---
 
-## 📁 项目结构
-
-```
-api-aggregator/
-├── cmd/
-│   └── aggregator/
-│       └── main.go              # 主程序入口
-├── pkg/
-│   └── apiserver/
-│       └── apiserver.go         # API Server 核心逻辑
-├── manifests/
-│   ├── rbac.yaml               # RBAC 权限
-│   ├── deployment.yaml         # Deployment
-│   ├── service.yaml            # Service
-│   └── apiservice.yaml         # APIService（注册到 K8s）
-├── hack/
-│   ├── build.sh               # 构建脚本
-│   ├── deploy.sh              # 部署脚本
-│   ├── cleanup.sh             # 清理脚本
-│   ├── test.sh               # 测试脚本
-│   └── generate-certs.sh      # 证书生成
-├── Dockerfile                 # 镜像构建
-├── go.mod                     # Go 依赖
-├── go.sum                     # Go 依赖校验
-└── README.md                  # 本文件
-```
-
----
-
-## 🚀 快速部署
+## 🚀 快速开始
 
 ### 前置条件
 
 - Kubernetes 集群（版本 v1.19+）
 - `kubectl` 已配置
-- Docker（用于构建镜像）
 - OpenSSL（用于生成证书）
 
-### 1. 修改配置
-
-编辑 `manifests/deployment.yaml`，修改白名单节点列表：
-
-```yaml
-args:
-- --allowed-nodes=node01,node02,node03  # 👈 改为你的白名单节点
-```
-
-### 2. 构建镜像
+### 1. 下载文件
 
 ```bash
+git clone https://github.com/yourname/webhook-node-validator.git
+cd webhook-node-validator
+```
+
+### 2.修改配置
+#### 修改允许的节点列表
+
+编辑 `5-webhook-deployment.yaml`，修改 `ALLOWED_NODES` 环境变量：
+
+```
+env:
+- name: ALLOWED_NODES
+  value: "node01,node02,node02"  # 👈 改为你的白名单节点
+```
+
+#### 修改命名空间（可选）
+
+默认使用 `my-namespace`，如需修改，在所有 YAML 文件中替换 `my-namespace` 为你的命名空间。
+
+### 3. 一键部署
+
+```
 # 给脚本添加执行权限
-chmod +x hack/*.sh
 
-# 构建镜像
-./hack/build.sh
+chmod +x deploy.sh cleanup.sh generate-certs.sh
+# 执行部署
+./deploy.sh
 ```
 
-### 3. 部署
+部署完成后会输出：
 
-```bash
-# 一键部署
-./hack/deploy.sh
+- ServiceAccount Token（用于后续 API 调用）
+
+- 测试命令示例
+
+
+### 🔧 工作原理
+整体架构
+
 ```
 
-### 4. 验证
-
-```bash
-# 查看 Pod 状态
-kubectl get pods -n kube-system -l app=api-aggregator
-
-# 查看日志
-kubectl logs -n kube-system -l app=api-aggregator --tail=20
-
-# 运行测试
-./hack/test.sh
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        用户创建 Pod 请求                                    │
+│                                                                             │
+│  方式一：不指定 nodeName                                                    │
+│  方式二：指定 nodeName（如：node01）                                     │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        MutatingWebhook                                      │
+│                                                                             │
+│  如果未指定 nodeName：                                                      │
+│    → 自动注入 nodeSelector: {"node-group": "allowed"}                      │
+│    → 让 Kubernetes 调度器选择节点                                          │
+│                                                                             │
+│  如果指定了 nodeName：                                                      │
+│    → 检查 nodeName 是否在白名单中                                           │
+│    → 在白名单中则放行，不在则拒绝                                           │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ValidatingWebhook                                   │
+│                                                                             │
+│  1. 检查是否指定了 nodeName                                                │
+│  2. 如果指定了 nodeName → 校验是否在白名单中                               │
+│  3. 如果未指定 nodeName → 检查是否有 nodeSelector                          │
+│  4. 验证通过则放行，否则拒绝                                               │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Kubernetes Scheduler                                 │
+│                                                                             │
+│  根据 nodeSelector: {"node-group": "allowed"}                              │
+│    → 智能选择最优的白名单节点                                              │
+│    → 考虑资源、亲和性、污点等因素                                          │
+│    → 如果所有节点资源不足，Pod 保持 Pending                                │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+### 核心组件
 
-## 📝 使用方式
+| 组件                  | 作用                                                         |
+| :-------------------- | :----------------------------------------------------------- |
+| **ServiceAccount**    | 为客户端提供身份认证 Token                                   |
+| **RBAC**              | 控制客户端对 Pod 的操作权限                                  |
+| **MutatingWebhook**   | 自动注入 `nodeSelector: {node-group: allowed}`，让调度器选择节点 |
+| **ValidatingWebhook** | 校验 `nodeName` 是否在白名单中                               |
+| **NodeSelector**      | 通过节点标签 `node-group=allowed` 限制调度范围               |
 
-### 方式一：修改 Java 代码（推荐）
+### 📝 使用方法
+#### 获取 Token
 
-```java
-// 原来：直接调用 Kubernetes API
-String url = "https://x.x.x.x:6443/api/v1/namespaces/default/pods";
+部署完成后，Token 会显示在控制台输出中。如果忘记保存，可以重新获取：
 
-// 改为：通过 API Aggregator
-String url = "https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods";
+bash
+```
+# 获取 ServiceAccount 对应的 Secret
+SA_SECRET=$(kubectl get serviceaccount multi-node-operator-sa -n my-namespace -o jsonpath='{.secrets[0].name}')
+# 获取 Token
+TOKEN=$(kubectl get secret ${SA_SECRET} -n my-namespace -o jsonpath='{.data.token}' | base64 -d)
+echo ${TOKEN}
 ```
 
-**Token 完全不变**，继续使用 ServiceAccount Token。
+#### 创建 Pod（方式一：不指定节点）⭐ 推荐
+由 Kubernetes 调度器智能选择白名单节点：
 
-### 方式二：使用 kubectl
+```
+kubectl run my-pod \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
+  --token=${TOKEN}
+```
 
-```bash
-# 1. 获取 Token
+调度逻辑：
+
+✅ Webhook 自动注入 nodeSelector: {"node-group": "allowed"}
+
+✅ Kubernetes 调度器选择最优的白名单节点
+
+✅ 如果某个节点资源不足，自动选择其他白名单节点
+
+✅ 如果所有节点资源不足，Pod 保持 Pending 状态
+
+#### 创建 Pod（方式二：指定节点）
+必须指定白名单中的节点：
+
+```
+kubectl run my-pod \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
+  --overrides='{"spec":{"nodeName":"node01"}}' \
+  --token=${TOKEN}
+```
+
+#### 创建 Pod（方式三：使用 Deployment）
+
+```
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-namespace
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      # 不需要指定 nodeName，Webhook 会自动注入 nodeSelector
+      containers:
+      - name: nginx
+        image: nginx:latest
+EOF
+```
+
+#### 查看 Pod 调度结果
+
+```
+# 查看 Pod 调度到哪个节点
+kubectl get pods -n my-namespace -o wide
+
+# 查看 Pod 的 nodeSelector（确认已自动注入）
+kubectl get pod my-pod -n my-namespace -o yaml | grep -A 3 nodeSelector
+```
+
+### 🧪 测试
+#### 准备工作
+
+```
+# 获取 Token
+
 TOKEN=$(kubectl get secret -n my-namespace $(kubectl get serviceaccount multi-node-operator-sa -n my-namespace -o jsonpath='{.secrets[0].name}') -o jsonpath='{.data.token}' | base64 -d)
 
-# 2. 通过 API Aggregator 查询（只返回白名单节点的 Pod）
-curl -k -H "Authorization: Bearer ${TOKEN}" \
-  https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods
-
-# 3. 通过 API Aggregator 创建 Pod（必须指定白名单节点）
-curl -k -X POST -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods \
-  -d '{
-    "apiVersion": "v1",
-    "kind": "Pod",
-    "metadata": {"name": "my-pod"},
-    "spec": {
-      "nodeName": "hadoop02",
-      "containers": [{"name": "nginx", "image": "nginx:latest"}]
-    }
-  }'
+# 查看白名单节点
+kubectl get nodes --show-labels | grep node-group
 ```
 
-### 方式三：配置 kubectl context
+#### 测试 1：不指定节点（自动调度）
 
-```bash
-# 1. 配置 context
-kubectl config set-cluster aggregator-cluster \
-  --server=https://api-aggregator.kube-system.svc \
-  --insecure-skip-tls-verify=true
+```
+echo "=== 测试 1：不指定节点，由调度器选择 ==="
 
-kubectl config set-credentials aggregator-user \
+kubectl run test-auto \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
   --token=${TOKEN}
 
-kubectl config set-context aggregator-context \
-  --cluster=aggregator-cluster \
-  --user=aggregator-user \
-  --namespace=default
+# 查看 Pod 调度结果
 
-# 2. 切换到 aggregator context
-kubectl config use-context aggregator-context
+kubectl get pod test-auto -n my-namespace -o wide
 
-# 3. 现在 kubectl 命令走 API Aggregator
-kubectl get pods  # 只返回白名单节点的 Pod
+# 验证 nodeSelector 已注入
 
-# 4. 切换回默认 context
-kubectl config use-context default
+kubectl get pod test-auto -n my-namespace -o yaml | grep -A 3 nodeSelector
+
+# 清理
+
+kubectl delete pod test-auto -n my-namespace
 ```
 
----
+**预期结果： Pod 调度到某个白名单节点**
 
-## 🧪 验证
+#### 测试 2：指定白名单节点
+```
+echo "=== 测试 2：指定白名单节点 ==="
 
-### 快速验证脚本
+kubectl run test-allowed \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
+  --overrides='{"spec":{"nodeName":"node01"}}' \
+  --token=${TOKEN}
 
-```bash
-./hack/test.sh
+kubectl get pod test-allowed -n my-namespace -o wide
+
+# 清理
+
+kubectl delete pod test-allowed -n my-namespace
 ```
 
-### 手动验证
+**预期结果： Pod 成功创建在 node01节点上**
 
-```bash
-# 1. 检查 Pod 状态
-kubectl get pods -n kube-system -l app=api-aggregator
+#### 测试 3：指定非白名单节点（应被拒绝）
 
-# 2. 健康检查
-kubectl run test-curl --rm -it --image=curlimages/curl --restart=Never -- \
-  curl -k -s https://api-aggregator.kube-system.svc/healthz
+```
+echo "=== 测试 3：指定非白名单节点（应被拒绝） ==="
 
-# 3. 查询 Pod（通过 API Aggregator）
-kubectl run test-curl --rm -it --image=curlimages/curl --restart=Never -- \
-  curl -k -s -H "Authorization: Bearer ${TOKEN}" \
-  https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods
+kubectl run test-denied \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
+  --overrides='{"spec":{"nodeName":"node-04"}}' \
+  --token=${TOKEN}
 
-# 4. 对比直接查询 K8s API
-kubectl run test-curl --rm -it --image=curlimages/curl --restart=Never -- \
-  curl -k -s -H "Authorization: Bearer ${TOKEN}" \
-  https://kubernetes.default.svc/api/v1/namespaces/default/pods
+# 预期输出：
+
+# Error from server: admission webhook "node-validation.my-namespace.svc" denied the request: Node 'node-04' is not allowed. Allowed nodes: node01, node02, node03
 ```
 
-### 预期结果
+#### 测试 4：模拟资源不足场景
 
-| 操作                                  | 预期结果               |
-| ------------------------------------- | ---------------------- |
-| `kubectl get pods`（通过 Aggregator） | 只返回白名单节点的 Pod |
-| `kubectl get pods`（直接 K8s API）    | 返回所有 Pod           |
-| 在白名单节点创建 Pod                  | ✅ 成功                 |
-| 在非白名单节点创建 Pod                | ❌ 返回 403 Forbidden   |
+```
+echo "=== 测试 4：模拟节点资源不足 ==="
 
----
+# 1. 查看当前 Pod 分布
 
-## 📊 与 Webhook 方案对比
+kubectl get pods -n my-namespace -o wide
 
-| 功能                              | Webhook 方案    | API Aggregator 方案 |
-| --------------------------------- | --------------- | ------------------- |
-| **拦截 CREATE**                   | ✅ 支持          | ✅ 支持              |
-| **拦截 DELETE**                   | ✅ 支持          | ✅ 支持              |
-| **拦截 UPDATE**                   | ✅ 支持          | ✅ 支持              |
-| **拦截 LIST（kubectl get pods）** | ❌ 不支持        | ✅ 支持              |
-| **过滤 LIST 结果**                | ❌ 不支持        | ✅ 支持              |
-| **用户感知**                      | 创建时被拦截    | 完全透明            |
-| **代码改动（Java）**              | 不需要改 URL    | 需要改 URL 地址     |
-| **实现语言**                      | Python（Flask） | Go                  |
-| **维护成本**                      | 低              | 中                  |
+# 2. 标记一个白名单节点为不可调度（模拟资源不足）
 
----
+kubectl cordon node01
 
-## 🔧 配置说明
+# 3. 创建 Pod（不指定节点）
 
-### 修改白名单节点
+kubectl run test-scheduler \
+  --image=nginx:latest \
+  --restart=Never \
+  -n my-namespace \
+  --token=${TOKEN}
 
-编辑 `manifests/deployment.yaml`：
+# 4. 查看 Pod 调度到哪个节点（应该自动选择其他白名单节点）
 
-```yaml
-args:
-- --allowed-nodes=node01,node02,node03  # 用逗号分隔
+kubectl get pod test-scheduler -n my-namespace -o wide
+
+# 5. 恢复节点
+
+kubectl uncordon node01
+
+# 6. 清理
+kubectl delete pod test-scheduler -n my-namespace
 ```
 
-重新部署：
+**预期结果： Pod 自动调度到其他白名单节点**
 
-```bash
-kubectl apply -f manifests/deployment.yaml
-kubectl rollout restart deployment/api-aggregator -n kube-system
+#### 测试 5：批量创建 Pod（负载均衡）
+
+```
+echo "=== 测试 5：批量创建 Pod，验证负载均衡 ==="
+
+# 创建 5 个 Pod
+
+for i in {1..5}; do
+  kubectl run test-load-$i \
+    --image=nginx:latest \
+    --restart=Never \
+    -n my-namespace \
+    --token=${TOKEN}
+done
+
+# 查看 Pod 分布
+
+kubectl get pods -n my-namespace -o wide | grep test-load
+
+# 清理
+
+kubectl delete pods -n my-namespace -l run=test-load
 ```
 
-### 修改日志级别
+**预期结果： Pod 均匀分布在白名单节点上**
 
-```yaml
-args:
-- --allowed-nodes=node01,node02,node03
-- --v=4  # 日志级别：0-5，数字越大日志越详细
+#### 测试 6：无标签命名空间（Webhook 不生效）
+```
+echo "=== 测试 6：无标签命名空间（Webhook 不生效） ==="
+
+# 在 default 命名空间创建 Pod（没有 webhook-enabled=true 标签）
+
+kubectl run test-default \
+  --image=nginx:latest \
+  --restart=Never \
+  -n default \
+  --token=${TOKEN}
+
+# 查看 Pod（应该正常创建，不受限制）
+
+kubectl get pod test-default -n default -o wide
+
+# 清理
+
+kubectl delete pod test-default -n default
 ```
 
----
+### 🎯 命名空间级别控制（namespaceSelector）
+什么是 namespaceSelector？
+`namespaceSelector` 是 Admission Webhook 的配置项，用于**控制 Webhook 在哪些命名空间生效**。
 
-## 🧹 清理
-
-### 一键清理
-
-```bash
-./hack/cleanup.sh
+```
+namespaceSelector:
+  matchLabels:
+    webhook-enabled: "true"  # 只有打了这个标签的命名空间才生效
 ```
 
-### 手动清理
+### 为什么需要 namespaceSelector？
 
-```bash
-# 删除 APIService
-kubectl delete apiservice v1.node-pod.example.com
+1. **灰度测试**：先在测试命名空间验证，确认无误再扩展到生产
+2. **故障隔离**：如果 Webhook 有问题，可以快速移除标签回滚
+3. **灵活控制**：可以为不同的命名空间启用或禁用 Webhook
+4. **最小影响**：避免影响系统命名空间（如 kube-system）
+
+### 配置方式
+#### 方式一：只对特定命名空间生效（默认配置）
+
+```
+namespaceSelector:
+  matchLabels:
+    webhook-enabled: "true"
+```
+
+**启用命名空间：**
+
+```
+kubectl label namespace my-namespace webhook-enabled=true
+```
+
+**禁用命名空间：**
+
+```
+kubectl label namespace my-namespace webhook-enabled-
+```
+
+#### 方式二：对所有命名空间生效
+```
+# 删除 namespaceSelector 配置，或设置为空
+
+namespaceSelector: {}
+```
+
+#### 方式三：排除特定命名空间
+yaml
+
+```
+namespaceSelector:
+  matchExpressions:
+  - key: kubernetes.io/metadata.name
+    operator: NotIn
+    values: ["kube-system", "kube-public"]
+```
+
+### 查看当前配置
+
+```
+# 查看 ValidatingWebhook 的 namespaceSelector
+
+kubectl get validatingwebhookconfiguration node-validation-webhook -o yaml | grep -A 5 namespaceSelector
+
+# 查看命名空间标签
+
+kubectl get namespaces --show-labels
+```
+
+### 🔍 监控与调试
+#### 查看 Webhook 状态
+
+```
+# 查看 Pod 状态
+
+kubectl get pods -n my-namespace -l app=node-validation-webhook
+
+# 查看日志
+
+kubectl logs -f -n my-namespace -l app=node-validation-webhook
+
+# 查看 Deployment 状态
+
+kubectl get deployment node-validation-webhook -n my-namespace
+```
+
+#### 查看 Webhook 配置
+bash
+
+```
+# 查看 ValidatingWebhookConfiguration
+
+kubectl get validatingwebhookconfiguration node-validation-webhook -o yaml
+
+# 查看 MutatingWebhookConfiguration
+
+kubectl get mutatingwebhookconfiguration node-selector-webhook -o yaml
+```
+
+### 常见问题排查
+
+| 问题                   | 可能原因                 | 解决方案                                                    |
+| :--------------------- | :----------------------- | :---------------------------------------------------------- |
+| Pod 无法创建           | Webhook 拒绝             | 检查节点名是否在白名单中                                    |
+| Webhook 不生效         | 命名空间没有标签         | `kubectl label namespace my-namespace webhook-enabled=true` |
+| 所有命名空间都生效     | 删除了 namespaceSelector | 重新添加 namespaceSelector                                  |
+| 证书错误               | 证书过期或不匹配         | 重新生成证书 `./generate-certs.sh`                          |
+| Pod 一直 Pending       | 没有可用节点             | 检查节点是否有 `node-group=allowed` 标签，或节点资源不足    |
+| Pod 调度到非白名单节点 | 节点标签缺失             | 检查节点是否有 `node-group=allowed` 标签                    |
+
+### 🧹 清理
+#### 一键清理
+
+```
+./cleanup.sh
+```
+
+清理脚本会：
+
+1. 删除所有 Webhook 相关资源
+2. 移除节点标签（`allowed-node` 和 `node-group`）
+3. 询问是否删除命名空间
+4. 询问是否删除证书文件
+
+#### 手动清理
+
+```
+# 删除 ValidatingWebhookConfiguration
+
+kubectl delete validatingwebhookconfiguration node-validation-webhook
+
+# 删除 MutatingWebhookConfiguration
+
+kubectl delete mutatingwebhookconfiguration node-selector-webhook
 
 # 删除 Deployment
-kubectl delete deployment api-aggregator -n kube-system
+
+kubectl delete deployment node-validation-webhook -n my-namespace
 
 # 删除 Service
-kubectl delete service api-aggregator -n kube-system
 
-# 删除 Secret
-kubectl delete secret api-aggregator-tls -n kube-system
+kubectl delete service webhook-service -n my-namespace
 
 # 删除 RBAC
-kubectl delete clusterrolebinding api-aggregator
-kubectl delete clusterrole api-aggregator
-kubectl delete serviceaccount api-aggregator -n kube-system
 
-# 删除证书目录
-rm -rf certs/
+kubectl delete clusterrolebinding node-reader-binding
+kubectl delete clusterrolebinding webhook-validator-binding
+kubectl delete clusterrole node-reader
+kubectl delete clusterrole webhook-validator
+kubectl delete rolebinding pod-full-control-binding -n my-namespace
+kubectl delete role pod-full-control -n my-namespace
+
+# 删除 ServiceAccount
+
+kubectl delete serviceaccount multi-node-operator-sa -n my-namespace
+kubectl delete serviceaccount webhook-sa -n my-namespace
+
+# 删除命名空间
+
+kubectl delete namespace my-namespace
+
+# 移除节点标签
+
+kubectl label node node01 node-group-
 ```
 
----
+#### ####  🔐 安全说明最小权限原则
+- Webhook 只授予必要的 RBAC 权限
+- ServiceAccount 只授予创建/删除 Pod 的权限
+- Token 应妥善保管，不要泄露
 
-## 🐛 故障排查
+#### Token 管理
+bash
 
-### 问题 1：Pod 无法启动
+```
+# 查看 Token 是否存在
 
-```bash
-# 查看日志
-kubectl logs -n kube-system -l app=api-aggregator
+kubectl get secret -n my-namespace | grep multi-node-operator-sa
 
-# 查看 Pod 详情
-kubectl describe pod -n kube-system -l app=api-aggregator
+# 删除 Token（如果需要撤销）
+
+kubectl delete secret <secret-name> -n my-namespace
+
+# 重新创建 Token
+
+kubectl delete serviceaccount multi-node-operator-sa -n my-namespace
+kubectl apply -f 1-serviceaccount.yaml
 ```
 
-### 问题 2：APIService 不可用
+### 🛠️ 自定义开发
+#### 修改允许的节点
+```
+# 方式一：修改 Deployment 环境变量
 
-```bash
-# 检查 APIService 状态
-kubectl get apiservice v1.node-pod.example.com
+kubectl set env deployment/node-validation-webhook -n my-namespace \
+  ALLOWED_NODES="node01,node02,node03"
 
-# 查看详细信息
-kubectl describe apiservice v1.node-pod.example.com
+# 方式二：编辑 Deployment
+
+kubectl edit deployment node-validation-webhook -n my-namespace
 ```
 
-### 问题 3：连接被拒绝
+#### 修改 Webhook 逻辑
+1. 编辑 `3-webhook-code-configmap.yaml`
+2. 修改 Python 代码
+3. 重新应用 ConfigMap：
 
-```bash
-# 检查 Service
-kubectl get svc api-aggregator -n kube-system
-
-# 检查 Endpoint
-kubectl get endpoints api-aggregator -n kube-system
-
-# 检查证书
-kubectl get secret api-aggregator-tls -n kube-system
+```
+kubectl apply -f 3-webhook-code-configmap.yaml
+kubectl rollout restart deployment/node-validation-webhook -n my-namespace
 ```
 
-### 问题 4：Token 无效
+### 构建自定义镜像
 
-```bash
-# 重新生成 Token
-kubectl delete secret multi-node-operator-sa-token -n my-namespace --ignore-not-found=true
+```
+# 1. 修改 Dockerfile
 
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: multi-node-operator-sa-token
-  namespace: my-namespace
-  annotations:
-    kubernetes.io/service-account.name: multi-node-operator-sa
-type: kubernetes.io/service-account-token
-EOF
+vim Dockerfile
 
-sleep 2
-TOKEN=$(kubectl get secret multi-node-operator-sa-token -n my-namespace -o jsonpath='{.data.token}' | base64 -d)
+# 2. 构建镜像
+
+docker build -t webhook-node-validator:latest .
+
+# 3. 推送镜像
+
+docker push webhook-node-validator:latest
+
+# 4. 更新 Deployment
+
+kubectl rollout restart deployment/node-validation-webhook -n my-namespace
 ```
 
----
+### 📊 性能指标
 
-## 🔐 安全说明
+| 指标             | 值          |
+| :--------------- | :---------- |
+| Webhook 响应时间 | < 50ms      |
+| 内存使用         | ~128Mi      |
+| CPU 使用         | ~100m       |
+| 副本数           | 2（高可用） |
 
-- **Token 认证**：所有请求必须携带有效的 ServiceAccount Token
-- **最小权限原则**：API Aggregator 只授予必要的 RBAC 权限
-- **证书管理**：使用 TLS 证书加密通信，证书需定期更新
-- **审计日志**：所有请求都有日志记录，便于审计
+### 📚 参考资料
+- [Kubernetes Admission Webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
+- [ServiceAccount Tokens](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/)
+- [RBAC Authorization](https://kubernetes.io/docs/reference/access-authn-authz/rbac/)
+- [Namespace Selectors](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#namespace-selectors)
+

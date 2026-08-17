@@ -91,7 +91,7 @@ func (s *APIServer) handleRequest(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // 解析路径: /api/v1/namespaces/{namespace}/pods
+    // 解析路径
     parts := strings.Split(strings.Trim(path, "/"), "/")
 
     if len(parts) < 4 {
@@ -99,8 +99,6 @@ func (s *APIServer) handleRequest(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // /api/v1/namespaces/{namespace}/pods
-    // 或 /api/v1/namespaces/{namespace}/pods/{name}
     namespace := parts[3]
     resource := ""
     podName := ""
@@ -137,7 +135,6 @@ func (s *APIServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) listPods(w http.ResponseWriter, r *http.Request, namespace string) {
     fieldSelector := r.URL.Query().Get("fieldSelector")
 
-    // 如果用户指定了 nodeName，检查是否在白名单中
     if strings.Contains(fieldSelector, "spec.nodeName") {
         nodeName := extractNodeName(fieldSelector)
         if nodeName != "" && !s.AllowedMap[nodeName] {
@@ -190,6 +187,7 @@ func (s *APIServer) getPod(w http.ResponseWriter, r *http.Request, namespace, na
     json.NewEncoder(w).Encode(pod)
 }
 
+// 🔑 核心修改：createPod 支持智能调度
 func (s *APIServer) createPod(w http.ResponseWriter, r *http.Request, namespace string) {
     var pod corev1.Pod
     if err := json.NewDecoder(r.Body).Decode(&pod); err != nil {
@@ -197,16 +195,36 @@ func (s *APIServer) createPod(w http.ResponseWriter, r *http.Request, namespace 
         return
     }
 
-    if pod.Spec.NodeName == "" {
-        http.Error(w, "Pod must specify nodeName", http.StatusBadRequest)
+    klog.Infof("Creating pod %s in namespace %s, nodeName: %s", pod.Name, namespace, pod.Spec.NodeName)
+
+    // 1. 如果指定了 nodeName，检查是否在白名单中
+    if pod.Spec.NodeName != "" {
+        if !s.AllowedMap[pod.Spec.NodeName] {
+            http.Error(w, fmt.Sprintf("Node '%s' is not allowed. Allowed nodes: %v",
+                pod.Spec.NodeName, s.AllowedNodes), http.StatusForbidden)
+            return
+        }
+        // 指定了白名单节点，直接创建
+        created, err := s.KubeClient.CoreV1().Pods(namespace).Create(r.Context(), &pod, metav1.CreateOptions{})
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(created)
         return
     }
 
-    if !s.AllowedMap[pod.Spec.NodeName] {
-        http.Error(w, fmt.Sprintf("Node '%s' is not allowed", pod.Spec.NodeName), http.StatusForbidden)
-        return
+    // 2. 如果没有指定 nodeName，注入 nodeSelector
+    // 让 Kubernetes 调度器选择最优的白名单节点
+    if pod.Spec.NodeSelector == nil {
+        pod.Spec.NodeSelector = make(map[string]string)
     }
+    pod.Spec.NodeSelector["node-group"] = "allowed"
+    klog.Infof("Auto-injected nodeSelector: node-group=allowed for pod %s", pod.Name)
 
+    // 3. 创建 Pod（由 K8s 调度器调度）
     created, err := s.KubeClient.CoreV1().Pods(namespace).Create(r.Context(), &pod, metav1.CreateOptions{})
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -276,14 +294,12 @@ func (s *APIServer) deletePod(w http.ResponseWriter, r *http.Request, namespace,
 }
 
 func (s *APIServer) proxyToK8s(w http.ResponseWriter, r *http.Request) {
-    // 读取 ServiceAccount Token
     token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
 
-    // 构建 K8s API URL
     k8sURL := fmt.Sprintf("https://kubernetes.default.svc:443%s", r.URL.Path)
     if r.URL.RawQuery != "" {
         k8sURL = fmt.Sprintf("%s?%s", k8sURL, r.URL.RawQuery)
@@ -319,7 +335,6 @@ func (s *APIServer) proxyToK8s(w http.ResponseWriter, r *http.Request) {
     }
     w.WriteHeader(resp.StatusCode)
 
-    // 复制响应体
     var body []byte
     json.NewDecoder(resp.Body).Decode(&body)
     w.Write(body)

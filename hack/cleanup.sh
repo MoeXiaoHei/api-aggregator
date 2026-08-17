@@ -83,7 +83,24 @@ else
     print_info "ServiceAccount not found, skipping"
 fi
 
-# 6. 询问是否删除证书文件
+# 6. 删除节点标签（移除 node-group=allowed）
+print_header "🏷️  Removing Node Labels"
+print_info "Removing 'node-group' labels from nodes..."
+
+# 从 deployment 获取白名单节点列表
+ALLOWED_NODES=$(kubectl get deployment api-aggregator -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args[0]}' 2>/dev/null | sed 's/--allowed-nodes=//' || echo "node01,node02")
+print_info "Allowed nodes from config: ${ALLOWED_NODES}"
+
+IFS=',' read -ra NODE_ARRAY <<< "$ALLOWED_NODES"
+for node in "${NODE_ARRAY[@]}"; do
+    node=$(echo "$node" | xargs)  # trim whitespace
+    if [ -n "$node" ]; then
+        # 移除 node-group 标签
+        kubectl label node "$node" node-group- 2>/dev/null && print_success "Label 'node-group' removed from $node" || print_info "Label 'node-group' not found on $node"
+    fi
+done
+
+# 7. 询问是否删除证书文件
 print_header "📜 Certificate Files Cleanup"
 echo -e -n "${YELLOW}❓ Do you want to delete the 'certs' directory? (y/N): ${NC}"
 read -n 1 -r
@@ -98,7 +115,7 @@ else
     print_info "Certificates preserved at ${WHITE}./certs/${NC}"
 fi
 
-# 7. 询问是否删除镜像
+# 8. 询问是否删除镜像
 print_header "🐳 Docker Image Cleanup"
 echo -e -n "${YELLOW}❓ Do you want to delete the Docker image 'oicq/api-aggregator:latest'? (y/N): ${NC}"
 read -n 1 -r
@@ -124,4 +141,9 @@ echo -e "  cd .. && rm -rf api-aggregator/"
 echo ""
 echo -e "${YELLOW}  # Delete the Docker image manually${NC}"
 echo -e "  docker rmi oicq/api-aggregator:latest"
+echo ""
+echo -e "${YELLOW}  # Remove node labels manually${NC}"
+echo -e "  kubectl label node node01 node-group-"
+echo -e "  kubectl label node node02 node-group-"
+echo -e "  kubectl label node node03 node-group-"
 echo ""
