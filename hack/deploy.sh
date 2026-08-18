@@ -117,7 +117,7 @@ echo -e "${YELLOW}  # Create a pod WITHOUT nodeName (scheduler will choose)${NC}
 echo -e "  curl -k -X POST -H \"Authorization: Bearer ${TOKEN}\" -H \"Content-Type: application/json\" https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods -d '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-pod\"},\"spec\":{\"containers\":[{\"name\":\"nginx\",\"image\":\"nginx:latest\"}]}}'"
 echo ""
 echo -e "${YELLOW}  # Create a pod with nodeName (must be in whitelist)${NC}"
-echo -e "  curl -k -X POST -H \"Authorization: Bearer ${TOKEN}\" -H \"Content-Type: application/json\" https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods -d '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-pod\"},\"spec\":{\"nodeName\":\"hadoop02\",\"containers\":[{\"name\":\"nginx\",\"image\":\"nginx:latest\"}]}}'"
+echo -e "  curl -k -X POST -H \"Authorization: Bearer ${TOKEN}\" -H \"Content-Type: application/json\" https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods -d '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-pod\"},\"spec\":{\"nodeName\":\"node01\",\"containers\":[{\"name\":\"nginx\",\"image\":\"nginx:latest\"}]}}'"
 echo ""
 echo -e "${YELLOW}  # Delete a pod${NC}"
 echo -e "  curl -k -X DELETE -H \"Authorization: Bearer ${TOKEN}\" https://api-aggregator.kube-system.svc/api/v1/namespaces/default/pods/my-pod"

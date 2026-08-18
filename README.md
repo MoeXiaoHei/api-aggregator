@@ -140,7 +140,7 @@ api-aggregator/
 
 ```yaml
 args:
-- --allowed-nodes=hadoop02,example.com227,kg-lab-83-91  # 👈 改为你的白名单节点
+- --allowed-nodes=node01,node02  # 👈 改为你的白名单节点
 ```
 
 ### 2.构建镜像
@@ -346,7 +346,7 @@ kubectl get pod test-allowed -n default -o wide
 kubectl delete pod test-allowed -n default
 ```
 
-预期结果： Pod 成功创建在 hadoop02 节点上
+预期结果： Pod 成功创建在 node01 节点上
 
 ### 测试 3：指定非白名单节点（应被拒绝）
 
@@ -448,9 +448,8 @@ kubectl delete serviceaccount api-aggregator -n kube-system
 
 # 移除节点标签
 
-kubectl label node hadoop02 node-group-
-kubectl label node example.com227 node-group-
-kubectl label node kg-lab-83-91 node-group-
+kubectl label node node01 node-group-
+kubectl label node node02 node-group-
 ```
 
 ## 🔐 安全说明
